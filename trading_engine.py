@@ -89,3 +89,4 @@ def calculate_pnl(trades):
 def read_config(path):
     with open(path) as f:   # BUG: no exception handling
         return f.read()
+# trigger Sat May  2 23:53:57 IST 2026
