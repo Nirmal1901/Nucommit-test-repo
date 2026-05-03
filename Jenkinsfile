@@ -217,6 +217,29 @@ except Exception as e:
                 writeFile file: '_sentinel_webhook.py', text: """
 import json, urllib.request
 
+# Fetch SonarQube measures if available
+sonar_data = {}
+sonar_url_val = os.environ.get("SONAR_HOST_URL", "http://localhost:9000")
+sonar_proj    = "sentinel-capital-markets"
+try:
+    import urllib.request as _ur
+    sonar_token_val = os.environ.get("SONAR_AUTH_TOKEN","")
+    headers_sq = {}
+    if sonar_token_val:
+        import base64 as _b64
+        headers_sq["Authorization"] = "Basic " + _b64.b64encode(f"{sonar_token_val}:".encode()).decode()
+    metrics = "bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density"
+    _req = _ur.Request(
+        f"{sonar_url_val}/api/measures/component?component={sonar_proj}&metricKeys={metrics}",
+        headers=headers_sq
+    )
+    with _ur.urlopen(_req, timeout=5) as _r:
+        _d = json.loads(_r.read())
+        for m in _d.get("component",{}).get("measures",[]):
+            sonar_data[m["metric"]] = m.get("value")
+except Exception:
+    pass
+
 payload = json.dumps({
     "event":        "build_complete",
     "build_number": ${BUILD_NUMBER},
@@ -232,6 +255,16 @@ payload = json.dumps({
         "total_findings": ${total},
         "critical":       ${critical},
         "high":           ${high}
+    },
+    "sonarqube": {
+        "status":      os.environ.get("SONAR_GATE_STATUS",""),
+        "project_key": sonar_proj,
+        "url":         f"{sonar_url_val}/dashboard?id={sonar_proj}",
+        "bugs":        int(sonar_data.get("bugs") or 0),
+        "vulnerabilities": int(sonar_data.get("vulnerabilities") or 0),
+        "code_smells": int(sonar_data.get("code_smells") or 0),
+        "coverage":    float(sonar_data.get("coverage") or 0),
+        "duplication": float(sonar_data.get("duplicated_lines_density") or 0),
     }
 }).encode('utf-8')
 
