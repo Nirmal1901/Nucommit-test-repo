@@ -3,7 +3,8 @@ pipeline {
 
     environment {
         SONAR_HOST_URL   = 'http://localhost:9000'
-        SONAR_TOKEN      = credentials('sonarqube-token')
+        // SONAR_TOKEN intentionally NOT set here — withSonarQubeEnv injects it automatically.
+        // Setting it manually AND using withSonarQubeEnv causes a sonar.login conflict → auth failure.
         SENTINEL_API_KEY = credentials('sentinel-api-key')
         SENTINEL_URL     = 'http://localhost:8000'
     }
