@@ -10,6 +10,7 @@ import subprocess
 import pickle
 import requests
 
+
 # ── VULNERABILITY 1: SQL Injection (OWASP A03, MiFID II) ──────────────────────
 def get_trade_by_id(trade_id):
     """Fetch trade record — VULNERABLE: raw string interpolation → SQL injection."""
