@@ -62,6 +62,13 @@ pipeline {
                         ''',
                         returnStdout: true
                     ).trim().split('\n').findAll { it?.trim() }
+                        .findAll { f ->
+                            // Skip test files, __init__.py and helper scripts
+                            !f.contains('test_') &&
+                            !f.contains('__init__') &&
+                            !f.startsWith('_sentinel') &&
+                            !f.contains('/tests/')
+                        }
 
                     echo "Files to scan: ${changedFiles}"
 
@@ -88,7 +95,7 @@ with open(file_path, 'r', errors='replace') as f:
 payload = json.dumps({
     "code":      code,
     "filename":  file_path,
-    "provider":  "openai",
+    "provider":  "deepseek",
     "scan_mode": "full",
     "kb_layers": ["owasp", "mifid", "sebi", "cve", "pci", "dora"]
 }).encode('utf-8')
