@@ -85,10 +85,11 @@ pipeline {
                         // Use a Python helper script to POST the file to SENTINEL.
                         // This completely avoids shell escaping issues with special chars.
                         writeFile file: '_sentinel_scan.py', text: """
-import json, urllib.request, sys
+import json, urllib.request, sys, os
 
-file_path = sys.argv[1]
+file_path    = sys.argv[1]
 sentinel_url = sys.argv[2]
+api_key      = sys.argv[3] if len(sys.argv) > 3 else ""
 
 with open(file_path, 'r', errors='replace') as f:
     code = f.read()
@@ -97,6 +98,7 @@ payload = json.dumps({
     "code":      code,
     "filename":  file_path,
     "provider":  "deepseek",
+    "api_key":   api_key if api_key and api_key != "null" else None,
     "scan_mode": "full",
     "kb_layers": ["owasp", "mifid", "sebi", "cve", "pci", "dora"]
 }).encode('utf-8')
@@ -114,7 +116,7 @@ except Exception as e:
     print(json.dumps({"findings": [], "error": str(e)}))
 """
                         def response = sh(
-                            script: "python3 _sentinel_scan.py '${filePath}' '${SENTINEL_URL}'",
+                            script: "python3 _sentinel_scan.py '${filePath}' '${SENTINEL_URL}' '${SENTINEL_API_KEY}'",
                             returnStdout: true
                         ).trim()
 
@@ -220,6 +222,7 @@ payload = json.dumps({
     "build_number": ${BUILD_NUMBER},
     "build_url":    "${BUILD_URL}",
     "repo_url":     "${GIT_URL}",
+    "repo_name":    "${GIT_URL}".split("/")[-1].replace(".git",""),
     "branch":       "${GIT_BRANCH}",
     "commit_hash":  "${GIT_COMMIT}",
     "author":       "${author}",
