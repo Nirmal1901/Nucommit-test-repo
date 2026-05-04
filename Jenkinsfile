@@ -91,14 +91,20 @@ file_path    = sys.argv[1]
 sentinel_url = sys.argv[2]
 api_key      = sys.argv[3] if len(sys.argv) > 3 else ""
 
+print(f"[SENTINEL] Scanning  : {file_path}", flush=True)
+print(f"[SENTINEL] Backend   : {sentinel_url}/scan", flush=True)
+key_status = ('SET (' + str(len(api_key)) + ' chars)') if api_key and api_key not in ('null','') else 'NOT SET — using .env DEEPSEEK_API_KEY'
+print(f"[SENTINEL] API key   : {key_status}", flush=True)
+
 with open(file_path, 'r', errors='replace') as f:
     code = f.read()
+print(f"[SENTINEL] Code size : {len(code)} chars", flush=True)
 
 payload = json.dumps({
     "code":      code,
     "filename":  file_path,
     "provider":  "deepseek",
-    "api_key":   api_key if api_key and api_key != "null" else None,
+    "api_key":   api_key if api_key and api_key not in ("null","") else None,
     "scan_mode": "full",
     "kb_layers": ["owasp", "mifid", "sebi", "cve", "pci", "dora"]
 }).encode('utf-8')
@@ -110,15 +116,44 @@ req = urllib.request.Request(
     method='POST'
 )
 try:
+    print("[SENTINEL] Posting to backend...", flush=True)
     with urllib.request.urlopen(req, timeout=120) as resp:
-        print(resp.read().decode('utf-8'))
+        raw = resp.read().decode('utf-8')
+        print(f"[SENTINEL] HTTP 200 — {len(raw)} chars received", flush=True)
+        try:
+            parsed = json.loads(raw)
+            findings = parsed.get('findings', [])
+            counts = {}
+            for fnd in findings:
+                s = fnd.get('severity','LOW')
+                counts[s] = counts.get(s,0)+1
+            print(f"[SENTINEL] Findings  : {len(findings)} — {counts}", flush=True)
+            for fnd in findings:
+                print(f"[SENTINEL]   [{fnd.get('severity','?')}] {fnd.get('title','?')}", flush=True)
+            if parsed.get('error'):
+                print(f"[SENTINEL] ERROR: {parsed['error']}", flush=True)
+        except Exception as pe:
+            print(f"[SENTINEL] Parse error: {pe}", flush=True)
+        print(raw)
+except urllib.error.HTTPError as e:
+    body = e.read().decode('utf-8')
+    print(f"[SENTINEL] HTTP ERROR {e.code}: {body[:400]}", flush=True)
+    print(json.dumps({"findings": [], "error": f"HTTP {e.code}"}))
+except urllib.error.URLError as e:
+    print(f"[SENTINEL] CONNECTION FAILED: {e.reason}", flush=True)
+    print(f"[SENTINEL] Is uvicorn running at {sentinel_url}?", flush=True)
+    print(json.dumps({"findings": [], "error": str(e)}))
 except Exception as e:
+    print(f"[SENTINEL] ERROR: {e}", flush=True)
     print(json.dumps({"findings": [], "error": str(e)}))
 """
-                        def response = sh(
+                        def fullOutput = sh(
                             script: "python3 _sentinel_scan.py '${filePath}' '${SENTINEL_URL}' '${SENTINEL_API_KEY}'",
                             returnStdout: true
                         ).trim()
+
+                        // Logs go to console; JSON is the last line starting with {
+                        def response = fullOutput.split('\n').findAll { it.startsWith('{') }.last() ?: '{}'
 
                         def criticalCount = response.count('"CRITICAL"')
                         def highCount     = response.count('"HIGH"')
@@ -215,7 +250,7 @@ except Exception as e:
 
                 // Python webhook poster — no shell escaping issues
                 writeFile file: '_sentinel_webhook.py', text: """
-import json, urllib.request
+import json, urllib.request, os
 
 # Fetch SonarQube measures if available
 sonar_data = {}
