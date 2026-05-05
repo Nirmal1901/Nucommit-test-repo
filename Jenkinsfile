@@ -70,92 +70,110 @@ pipeline {
 
                     echo "Files to scan: ${changedFiles}"
 
-                    def overallVerdict   = 'CLEAN'
-                    def totalCritical    = 0
-                    def totalHigh        = 0
-                    def totalFindings    = 0
-                    // ── KEY FIX: accumulate the full findings list ──────────
-                    def allFindingsJson  = '[]'
-
-                    changedFiles.each { filePath ->
-                        filePath = filePath.trim()
-                        if (!filePath || !fileExists(filePath)) return
-
-                        writeFile file: '_sentinel_scan.py', text: """
+                    // Write scan script — Python handles ALL JSON.
+                    // Findings accumulate into sentinel_findings.json on disk.
+                    // Groovy only reads plain-text counts — zero JSON sandbox issues.
+                    writeFile file: '_sentinel_scan.py', text: '''
 import json, urllib.request, sys, os
 
 file_path    = sys.argv[1]
 sentinel_url = sys.argv[2]
 api_key      = sys.argv[3] if len(sys.argv) > 3 else ""
+accum_file   = "sentinel_findings.json"
 
-with open(file_path, 'r', errors='replace') as f:
+with open(file_path, "r", errors="replace") as f:
     code = f.read()
 
 payload = json.dumps({
     "code":      code,
     "filename":  file_path,
     "provider":  "deepseek",
-    "api_key":   api_key if api_key and api_key not in ("null","") else None,
+    "api_key":   api_key if api_key and api_key not in ("null", "") else None,
     "scan_mode": "full",
     "kb_layers": ["owasp", "mifid", "sebi", "cve", "pci", "dora"]
-}).encode('utf-8')
+}).encode("utf-8")
 
 req = urllib.request.Request(
-    sentinel_url + '/scan',
+    sentinel_url + "/scan",
     data=payload,
-    headers={'Content-Type': 'application/json'},
-    method='POST'
+    headers={"Content-Type": "application/json"},
+    method="POST"
 )
 try:
     with urllib.request.urlopen(req, timeout=120) as resp:
-        raw = resp.read().decode('utf-8')
-        parsed = json.loads(raw)
-        findings = parsed.get('findings', [])
+        raw      = resp.read().decode("utf-8")
+        data     = json.loads(raw)
+        findings = data.get("findings", [])
+
         counts = {}
         for fnd in findings:
-            s = fnd.get('severity','LOW')
-            counts[s] = counts.get(s,0)+1
-        print(f"[SENTINEL] {file_path}: {len(findings)} findings — {counts}", flush=True)
+            s = fnd.get("severity", "LOW")
+            counts[s] = counts.get(s, 0) + 1
+
+        # Accumulate findings into shared file across multiple files scanned
+        existing = []
+        if os.path.exists(accum_file):
+            try:
+                with open(accum_file, "r") as af:
+                    existing = json.load(af)
+            except Exception:
+                existing = []
+        existing.extend(findings)
+        with open(accum_file, "w") as af:
+            json.dump(existing, af)
+
+        crit  = counts.get("CRITICAL", 0)
+        high  = counts.get("HIGH", 0)
+        med   = counts.get("MEDIUM", 0)
+        low   = counts.get("LOW", 0)
+        total = len(findings)
+
+        print(f"[SENTINEL] {file_path}: {total} findings — CRITICAL:{crit} HIGH:{high} MEDIUM:{med} LOW:{low}", flush=True)
         for fnd in findings:
             print(f"[SENTINEL]   [{fnd.get('severity','?')}] {fnd.get('title','?')}", flush=True)
-        # ── Print the full JSON as the last line so Groovy can capture it ──
-        print(raw, flush=True)
+
+        # Plain-text summary line — Groovy parses this with simple string splits
+        # No groovy.json needed, no sandbox violations
+        print(f"SENTINEL_COUNTS:critical={crit},high={high},total={total}", flush=True)
+
 except urllib.error.HTTPError as e:
-    body = e.read().decode('utf-8')
+    body = e.read().decode("utf-8")
     print(f"[SENTINEL] HTTP ERROR {e.code}: {body[:400]}", flush=True)
-    print(json.dumps({"findings": [], "error": f"HTTP {e.code}"}))
+    print("SENTINEL_COUNTS:critical=0,high=0,total=0", flush=True)
 except Exception as e:
     print(f"[SENTINEL] ERROR: {e}", flush=True)
-    print(json.dumps({"findings": [], "error": str(e)}))
-"""
+    print("SENTINEL_COUNTS:critical=0,high=0,total=0", flush=True)
+'''
+
+                    // Reset findings accumulator before scanning
+                    sh 'printf "[]" > sentinel_findings.json'
+
+                    def overallVerdict = 'CLEAN'
+                    def totalCritical  = 0
+                    def totalHigh      = 0
+                    def totalFindings  = 0
+
+                    changedFiles.each { filePath ->
+                        filePath = filePath.trim()
+                        if (!filePath || !fileExists(filePath)) return
+
                         def fullOutput = sh(
                             script: "python3 _sentinel_scan.py '${filePath}' '${SENTINEL_URL}' '${SENTINEL_API_KEY}'",
                             returnStdout: true
                         ).trim()
 
-                        // Last line starting with { is the JSON response
-                        def jsonLine = fullOutput.split('\n').findAll { it.startsWith('{') }.last() ?: '{}'
+                        echo fullOutput
 
-                        def parsed
-                        try {
-                            parsed = new groovy.json.JsonSlurper().parseText(jsonLine)
-                        } catch (Exception e) {
-                            parsed = [findings: []]
-                        }
-
-                        def findings     = parsed.findings ?: []
-                        def criticalCount = findings.count { it.severity == 'CRITICAL' }
-                        def highCount     = findings.count { it.severity == 'HIGH' }
-                        def fileFindings  = findings.size()
+                        // Parse plain-text summary — no JSON, no sandbox issues
+                        def summaryLine   = fullOutput.split('\n').find { it.startsWith('SENTINEL_COUNTS:') } ?: 'SENTINEL_COUNTS:critical=0,high=0,total=0'
+                        def parts         = summaryLine.replace('SENTINEL_COUNTS:', '').split(',')
+                        def criticalCount = (parts.find { it.startsWith('critical=') }?.split('=')?.getAt(1) ?: '0').toInteger()
+                        def highCount     = (parts.find { it.startsWith('high=') }?.split('=')?.getAt(1) ?: '0').toInteger()
+                        def fileFindings  = (parts.find { it.startsWith('total=') }?.split('=')?.getAt(1) ?: '0').toInteger()
 
                         totalCritical += criticalCount
                         totalHigh     += highCount
                         totalFindings += fileFindings
-
-                        // ── Accumulate findings for webhook ─────────────────
-                        def existing = new groovy.json.JsonSlurper().parseText(allFindingsJson)
-                        existing.addAll(findings)
-                        allFindingsJson = groovy.json.JsonOutput.toJson(existing)
 
                         echo "  ${filePath}: ${fileFindings} findings — CRITICAL:${criticalCount} HIGH:${highCount}"
                     }
@@ -165,27 +183,22 @@ except Exception as e:
 
                     echo "🛡️ SENTINEL verdict: ${overallVerdict} — total:${totalFindings} critical:${totalCritical} high:${totalHigh}"
 
-                    env.SENTINEL_VERDICT       = overallVerdict
-                    env.SENTINEL_CRITICAL      = totalCritical.toString()
-                    env.SENTINEL_HIGH          = totalHigh.toString()
-                    env.SENTINEL_TOTAL         = totalFindings.toString()
-                    // ── Store full findings JSON in env for webhook ─────────
-                    env.SENTINEL_FINDINGS_JSON = allFindingsJson
+                    env.SENTINEL_VERDICT  = overallVerdict
+                    env.SENTINEL_CRITICAL = totalCritical.toString()
+                    env.SENTINEL_HIGH     = totalHigh.toString()
+                    env.SENTINEL_TOTAL    = totalFindings.toString()
 
-                    // ── KEY FIX: do NOT call error() here ──────────────────
-                    // We mark the result but let SonarQube run first.
-                    // error() is called AFTER post{always} in the next stage.
+                    // Mark failure but do NOT call error() — let SonarQube run first.
+                    // error() is called in post{always} after webhook fires.
                     if (overallVerdict == 'BLOCKED') {
                         currentBuild.result = 'FAILURE'
-                        // Do NOT error() here — fall through to SonarQube
                     }
                 }
             }
         }
 
         stage('SonarQube Analysis') {
-            // ── KEY FIX: run even when build is FAILURE ─────────────────────
-            when { expression { true } }
+            when { expression { true } }   // run even if build is already FAILURE
             steps {
                 script {
                     def sonarAvailable = sh(
@@ -218,7 +231,7 @@ except Exception as e:
         }
 
         stage('Quality Gate') {
-            when { expression { true } }
+            when { expression { true } }   // run even if build is already FAILURE
             steps {
                 script {
                     try {
@@ -247,17 +260,16 @@ except Exception as e:
                 def total       = env.SENTINEL_TOTAL         ?: '0'
                 def author      = env.GIT_COMMITTER_NAME     ?: 'unknown'
                 def sonarStatus = env.SONAR_GATE_STATUS      ?: ''
-                // ── KEY FIX: pass the real findings array ──────────────────
-                def findingsJson = env.SENTINEL_FINDINGS_JSON ?: '[]'
 
+                // Webhook script reads sentinel_findings.json from disk —
+                // no env var JSON passing, no escaping problems
                 writeFile file: '_sentinel_webhook.py', text: """
 import json, urllib.request, os, base64
 
-sonar_url_val  = os.environ.get("SONAR_HOST_URL", "http://localhost:9000")
-sonar_proj     = "sentinel-capital-markets"
+sonar_url_val   = os.environ.get("SONAR_HOST_URL", "http://localhost:9000")
+sonar_proj      = "sentinel-capital-markets"
 sonar_token_val = os.environ.get("SONAR_AUTH_TOKEN", "")
 
-# Fetch live SonarQube measures
 sonar_data = {}
 try:
     headers_sq = {}
@@ -277,12 +289,14 @@ try:
 except Exception as e:
     print(f"SonarQube metrics fetch skipped: {e}")
 
-# ── KEY FIX: include the full findings array ───────────────────────────────
-findings_raw = '''${findingsJson}'''
+# Read full findings from disk — written by _sentinel_scan.py
+findings_list = []
 try:
-    findings_list = json.loads(findings_raw)
-except Exception:
-    findings_list = []
+    with open("sentinel_findings.json", "r") as f:
+        findings_list = json.load(f)
+    print(f"Loaded {len(findings_list)} findings from sentinel_findings.json")
+except Exception as e:
+    print(f"Could not read sentinel_findings.json: {e}")
 
 payload = json.dumps({
     "event":        "build_complete",
@@ -299,7 +313,6 @@ payload = json.dumps({
         "critical":       ${critical},
         "high":           ${high}
     },
-    # ── The full findings array — this is what was missing ─────────────────
     "findings": findings_list,
     "sonarqube": {
         "status":      "${sonarStatus}",
@@ -328,7 +341,7 @@ except Exception as e:
                 sh 'python3 _sentinel_webhook.py || true'
                 echo "📊 Result posted to SENTINEL — verdict: ${verdict}"
 
-                // ── KEY FIX: NOW raise the error after SonarQube has run ───
+                // Fire the pipeline failure AFTER sonar + webhook are done
                 if (verdict == 'BLOCKED') {
                     error("🚫 SENTINEL blocked: ${critical} CRITICAL vulnerabilities found")
                 }
