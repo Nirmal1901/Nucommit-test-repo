@@ -5,6 +5,7 @@ pipeline {
         SONAR_HOST_URL   = 'http://localhost:9000'
         SENTINEL_API_KEY = credentials('sentinel-api-key')
         SENTINEL_URL     = 'http://localhost:8000'
+        SONAR_AUTH_TOKEN = credentials('sonarqube-token')   // ← FIX: expose token for webhook
     }
 
     stages {
@@ -126,7 +127,6 @@ try:
         for fnd in findings:
             print(f"[SENTINEL]   [{fnd.get('severity','?')}] {fnd.get('title','?')}", flush=True)
 
-        # Single line Groovy reads with tokenize() — no getAt(), no sandbox issues
         print(f"SENTINEL_COUNTS critical={crit} high={high} total={total}", flush=True)
 
 except urllib.error.HTTPError as e:
@@ -156,11 +156,8 @@ except Exception as e:
 
                         echo fullOutput
 
-                        // tokenize() on a plain String — fully sandbox-safe
-                        // Line format: "SENTINEL_COUNTS critical=8 high=5 total=15"
                         def summaryLine = fullOutput.split('\n').find { it.startsWith('SENTINEL_COUNTS') } ?: 'SENTINEL_COUNTS critical=0 high=0 total=0'
                         def tokens      = summaryLine.tokenize(' ')
-                        // tokens = ["SENTINEL_COUNTS", "critical=8", "high=5", "total=15"]
                         def criticalCount = tokens.find { it.startsWith('critical=') }?.tokenize('=')?.last()?.toInteger() ?: 0
                         def highCount     = tokens.find { it.startsWith('high=') }?.tokenize('=')?.last()?.toInteger() ?: 0
                         def fileFindings  = tokens.find { it.startsWith('total=') }?.tokenize('=')?.last()?.toInteger() ?: 0
@@ -182,7 +179,6 @@ except Exception as e:
                     env.SENTINEL_HIGH     = totalHigh.toString()
                     env.SENTINEL_TOTAL    = totalFindings.toString()
 
-                    // Set result but do NOT call error() — must let SonarQube run first
                     if (overallVerdict == 'BLOCKED') {
                         currentBuild.result = 'FAILURE'
                     }
@@ -191,7 +187,6 @@ except Exception as e:
         }
 
         stage('SonarQube Analysis') {
-            // catchError lets this stage run even when build result is FAILURE
             steps {
                 catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
                     script {
@@ -258,7 +253,13 @@ import json, urllib.request, os, base64
 
 sonar_url_val   = os.environ.get("SONAR_HOST_URL", "http://localhost:9000")
 sonar_proj      = "sentinel-capital-markets"
-sonar_token_val = os.environ.get("SONAR_AUTH_TOKEN", "")
+sonar_token_val = os.environ.get("SONAR_AUTH_TOKEN", "")   # ← now populated from credentials
+
+# credentials('sonarqube-token') returns just the token if stored as StringCredentials.
+# If it was stored as UsernamePassword (fallback), it returns "sonarqube-token:<token>".
+# Strip the username prefix so Basic auth works either way.
+if ":" in sonar_token_val:
+    sonar_token_val = sonar_token_val.split(":", 1)[1]
 
 sonar_data = {}
 try:
@@ -276,8 +277,21 @@ try:
         _d = json.loads(_r.read())
         for m in _d.get("component", {}).get("measures", []):
             sonar_data[m["metric"]] = m.get("value")
+    print(f"SonarQube metrics fetched: {sonar_data}")
 except Exception as e:
     print(f"SonarQube metrics fetch skipped: {e}")
+
+# ── Coverage fallback: parse coverage.xml if SonarQube didn't return it ───
+if "coverage" not in sonar_data and os.path.exists("coverage.xml"):
+    try:
+        import xml.etree.ElementTree as ET
+        tree = ET.parse("coverage.xml")
+        root = tree.getroot()
+        line_rate = float(root.attrib.get("line-rate", 0))
+        sonar_data["coverage"] = round(line_rate * 100, 1)
+        print(f"Coverage from coverage.xml: {sonar_data['coverage']}%")
+    except Exception as e:
+        print(f"coverage.xml parse failed: {e}")
 
 findings_list = []
 try:
@@ -330,7 +344,6 @@ except Exception as e:
                 sh 'python3 _sentinel_webhook.py || true'
                 echo "📊 Result posted to SENTINEL — verdict: ${verdict}"
 
-                // Fire the block AFTER sonar + webhook are done
                 if (verdict == 'BLOCKED') {
                     error("🚫 SENTINEL blocked: ${critical} CRITICAL vulnerabilities found")
                 }
