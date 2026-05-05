@@ -9,7 +9,7 @@ import hashlib
 import subprocess
 import pickle
 import requests
-import os
+
 
 
 # ── VULNERABILITY 1: SQL Injection (OWASP A03, MiFID II) ──────────────────────
