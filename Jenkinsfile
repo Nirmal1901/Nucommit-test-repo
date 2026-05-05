@@ -18,10 +18,7 @@ pipeline {
 
         stage('Setup Python') {
             steps {
-                sh '''
-                    python3 -m pip install --user --quiet \
-                        pytest pytest-cov PyJWT requests
-                '''
+                sh 'python3 -m pip install --user --quiet pytest pytest-cov PyJWT requests'
             }
         }
 
@@ -57,6 +54,7 @@ pipeline {
                     def changedFiles = sh(
                         script: '''
                             git diff --name-only HEAD~1 HEAD 2>/dev/null | grep "\\.py$" \
+                            || git diff --name-only HEAD 2>/dev/null | grep "\\.py$" \
                             || git ls-files "*.py"
                         ''',
                         returnStdout: true
@@ -70,9 +68,6 @@ pipeline {
 
                     echo "Files to scan: ${changedFiles}"
 
-                    // Write scan script — Python handles ALL JSON.
-                    // Findings accumulate into sentinel_findings.json on disk.
-                    // Groovy only reads plain-text counts — zero JSON sandbox issues.
                     writeFile file: '_sentinel_scan.py', text: '''
 import json, urllib.request, sys, os
 
@@ -110,7 +105,6 @@ try:
             s = fnd.get("severity", "LOW")
             counts[s] = counts.get(s, 0) + 1
 
-        # Accumulate findings into shared file across multiple files scanned
         existing = []
         if os.path.exists(accum_file):
             try:
@@ -132,20 +126,18 @@ try:
         for fnd in findings:
             print(f"[SENTINEL]   [{fnd.get('severity','?')}] {fnd.get('title','?')}", flush=True)
 
-        # Plain-text summary line — Groovy parses this with simple string splits
-        # No groovy.json needed, no sandbox violations
-        print(f"SENTINEL_COUNTS:critical={crit},high={high},total={total}", flush=True)
+        # Single line Groovy reads with tokenize() — no getAt(), no sandbox issues
+        print(f"SENTINEL_COUNTS critical={crit} high={high} total={total}", flush=True)
 
 except urllib.error.HTTPError as e:
     body = e.read().decode("utf-8")
     print(f"[SENTINEL] HTTP ERROR {e.code}: {body[:400]}", flush=True)
-    print("SENTINEL_COUNTS:critical=0,high=0,total=0", flush=True)
+    print("SENTINEL_COUNTS critical=0 high=0 total=0", flush=True)
 except Exception as e:
     print(f"[SENTINEL] ERROR: {e}", flush=True)
-    print("SENTINEL_COUNTS:critical=0,high=0,total=0", flush=True)
+    print("SENTINEL_COUNTS critical=0 high=0 total=0", flush=True)
 '''
 
-                    // Reset findings accumulator before scanning
                     sh 'printf "[]" > sentinel_findings.json'
 
                     def overallVerdict = 'CLEAN'
@@ -164,12 +156,14 @@ except Exception as e:
 
                         echo fullOutput
 
-                        // Parse plain-text summary — no JSON, no sandbox issues
-                        def summaryLine   = fullOutput.split('\n').find { it.startsWith('SENTINEL_COUNTS:') } ?: 'SENTINEL_COUNTS:critical=0,high=0,total=0'
-                        def parts         = summaryLine.replace('SENTINEL_COUNTS:', '').split(',')
-                        def criticalCount = (parts.find { it.startsWith('critical=') }?.split('=')?.getAt(1) ?: '0').toInteger()
-                        def highCount     = (parts.find { it.startsWith('high=') }?.split('=')?.getAt(1) ?: '0').toInteger()
-                        def fileFindings  = (parts.find { it.startsWith('total=') }?.split('=')?.getAt(1) ?: '0').toInteger()
+                        // tokenize() on a plain String — fully sandbox-safe
+                        // Line format: "SENTINEL_COUNTS critical=8 high=5 total=15"
+                        def summaryLine = fullOutput.split('\n').find { it.startsWith('SENTINEL_COUNTS') } ?: 'SENTINEL_COUNTS critical=0 high=0 total=0'
+                        def tokens      = summaryLine.tokenize(' ')
+                        // tokens = ["SENTINEL_COUNTS", "critical=8", "high=5", "total=15"]
+                        def criticalCount = tokens.find { it.startsWith('critical=') }?.tokenize('=')?.last()?.toInteger() ?: 0
+                        def highCount     = tokens.find { it.startsWith('high=') }?.tokenize('=')?.last()?.toInteger() ?: 0
+                        def fileFindings  = tokens.find { it.startsWith('total=') }?.tokenize('=')?.last()?.toInteger() ?: 0
 
                         totalCritical += criticalCount
                         totalHigh     += highCount
@@ -188,8 +182,7 @@ except Exception as e:
                     env.SENTINEL_HIGH     = totalHigh.toString()
                     env.SENTINEL_TOTAL    = totalFindings.toString()
 
-                    // Mark failure but do NOT call error() — let SonarQube run first.
-                    // error() is called in post{always} after webhook fires.
+                    // Set result but do NOT call error() — must let SonarQube run first
                     if (overallVerdict == 'BLOCKED') {
                         currentBuild.result = 'FAILURE'
                     }
@@ -198,16 +191,16 @@ except Exception as e:
         }
 
         stage('SonarQube Analysis') {
-            when { expression { true } }   // run even if build is already FAILURE
+            // catchError lets this stage run even when build result is FAILURE
             steps {
-                script {
-                    def sonarAvailable = sh(
-                        script: "export PATH=\$PATH:/opt/homebrew/bin:/usr/local/bin && which sonar-scanner 2>/dev/null && echo yes || echo no",
-                        returnStdout: true
-                    ).trim().readLines().last()
+                catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+                    script {
+                        def sonarAvailable = sh(
+                            script: "export PATH=\$PATH:/opt/homebrew/bin:/usr/local/bin && which sonar-scanner 2>/dev/null && echo yes || echo no",
+                            returnStdout: true
+                        ).trim().readLines().last()
 
-                    if (sonarAvailable == 'yes') {
-                        try {
+                        if (sonarAvailable == 'yes') {
                             withSonarQubeEnv('SonarQube-Local') {
                                 sh '''
                                     export PATH=$PATH:/opt/homebrew/bin:/usr/local/bin
@@ -220,29 +213,28 @@ except Exception as e:
                                         -Dsonar.python.xunit.reportPath=test-results.xml
                                 '''
                             }
-                        } catch (Exception e) {
-                            echo "⚠️ SonarQube failed: ${e.message} — continuing"
+                        } else {
+                            echo "⚠️ sonar-scanner not found — skipping"
                         }
-                    } else {
-                        echo "⚠️ sonar-scanner not found — skipping"
                     }
                 }
             }
         }
 
         stage('Quality Gate') {
-            when { expression { true } }   // run even if build is already FAILURE
             steps {
-                script {
-                    try {
-                        timeout(time: 5, unit: 'MINUTES') {
-                            def qg = waitForQualityGate()
-                            env.SONAR_GATE_STATUS = qg.status
-                            echo "SonarQube Quality Gate: ${qg.status}"
+                catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+                    script {
+                        try {
+                            timeout(time: 5, unit: 'MINUTES') {
+                                def qg = waitForQualityGate()
+                                env.SONAR_GATE_STATUS = qg.status
+                                echo "SonarQube Quality Gate: ${qg.status}"
+                            }
+                        } catch (Exception e) {
+                            echo "⚠️ Quality Gate skipped: ${e.message}"
+                            env.SONAR_GATE_STATUS = ''
                         }
-                    } catch (Exception e) {
-                        echo "⚠️ Quality Gate skipped: ${e.message}"
-                        env.SONAR_GATE_STATUS = ''
                     }
                 }
             }
@@ -261,8 +253,6 @@ except Exception as e:
                 def author      = env.GIT_COMMITTER_NAME     ?: 'unknown'
                 def sonarStatus = env.SONAR_GATE_STATUS      ?: ''
 
-                // Webhook script reads sentinel_findings.json from disk —
-                // no env var JSON passing, no escaping problems
                 writeFile file: '_sentinel_webhook.py', text: """
 import json, urllib.request, os, base64
 
@@ -289,7 +279,6 @@ try:
 except Exception as e:
     print(f"SonarQube metrics fetch skipped: {e}")
 
-# Read full findings from disk — written by _sentinel_scan.py
 findings_list = []
 try:
     with open("sentinel_findings.json", "r") as f:
@@ -341,7 +330,7 @@ except Exception as e:
                 sh 'python3 _sentinel_webhook.py || true'
                 echo "📊 Result posted to SENTINEL — verdict: ${verdict}"
 
-                // Fire the pipeline failure AFTER sonar + webhook are done
+                // Fire the block AFTER sonar + webhook are done
                 if (verdict == 'BLOCKED') {
                     error("🚫 SENTINEL blocked: ${critical} CRITICAL vulnerabilities found")
                 }
