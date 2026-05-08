@@ -21,10 +21,10 @@ def get_trade_by_id(trade_id):
 
 
 def search_orders(client_name, status):
-    """Search orders — VULNERABLE: multiple injections."""
+    """Search orders — FIXED: parameterized query prevents SQL injection."""
     conn = sqlite3.connect("trades.db")
-    query = "SELECT * FROM orders WHERE client='" + client_name + "' AND status='" + status + "'"
-    return conn.execute(query).fetchall()
+    query = "SELECT * FROM orders WHERE client=? AND status=?"
+    return conn.execute(query, (client_name, status)).fetchall()
 
 
 # ── VULNERABILITY 2: Hardcoded Secrets (OWASP A02, PCI-DSS) ──────────────────
@@ -63,10 +63,12 @@ def execute_large_trade(order_id, quantity, price):
 
 # ── VULNERABILITY 6: Sensitive Data Exposure (PCI-DSS, DORA) ─────────────────
 def log_payment(card_number, cvv, amount):
-    """Log payment — VULNERABLE: logs raw card data."""
-    print(f"Processing card: {card_number} CVV: {cvv} amount: {amount}")   # DANGER
+    """Log payment — FIXED: masks sensitive card data, never logs raw PAN/CVV."""
+    # PCI-DSS Requirement 3: Never store full PAN or CVV in logs
+    masked_card = f"****-****-****-{card_number[-4:]}" if len(card_number) >= 4 else "****"
+    print(f"Processing card: {masked_card} amount: {amount}")   # SAFE: no raw PAN/CVV
     with open("/tmp/payments.log", "a") as f:
-        f.write(f"card={card_number},cvv={cvv},amount={amount}\n")          # DANGER
+        f.write(f"card={masked_card},amount={amount}\n")          # SAFE: no raw PAN/CVV
 
 
 # ── VULNERABILITY 7: Weak Cryptography (OWASP A02) ───────────────────────────
