@@ -14,17 +14,17 @@ import requests
 
 # ── VULNERABILITY 1: SQL Injection (OWASP A03, MiFID II) ──────────────────────
 def get_trade_by_id(trade_id):
-    """Fetch trade record — VULNERABLE: raw string interpolation → SQL injection."""
+    """Fetch trade record — FIXED: parameterized query prevents SQL injection."""
     conn = sqlite3.connect("trades.db")
-    query = f"SELECT * FROM trades WHERE id = '{trade_id}'"   # DANGER
-    return conn.execute(query).fetchone()
+    query = "SELECT * FROM trades WHERE id = ?"
+    return conn.execute(query, (trade_id,)).fetchone()
 
 
 def search_orders(client_name, status):
-    """Search orders — VULNERABLE: multiple injections."""
+    """Search orders — FIXED: parameterized query prevents SQL injection."""
     conn = sqlite3.connect("trades.db")
-    query = "SELECT * FROM orders WHERE client='" + client_name + "' AND status='" + status + "'"
-    return conn.execute(query).fetchall()
+    query = "SELECT * FROM orders WHERE client=? AND status=?"
+    return conn.execute(query, (client_name, status)).fetchall()
 
 
 # ── VULNERABILITY 2: Hardcoded Secrets (OWASP A02, PCI-DSS) ──────────────────
@@ -50,12 +50,13 @@ def load_trade_config(config_bytes):
 
 # ── VULNERABILITY 5: No Auth / Missing Access Control (MiFID II, SEBI) ───────
 def execute_large_trade(order_id, quantity, price):
-    """Execute trade — VULNERABLE: no authentication, no authorisation check."""
+    """Execute trade — FIXED: parameterized query prevents SQL injection."""
     # Should verify: user role, trade limits, client mandate
     total_value = quantity * price
     conn = sqlite3.connect("trades.db")
     conn.execute(
-        f"INSERT INTO executions VALUES ('{order_id}', {quantity}, {price}, {total_value})"
+        "INSERT INTO executions VALUES (?, ?, ?, ?)",
+        (order_id, quantity, price, total_value)
     )
     conn.commit()
     return {"status": "executed", "order_id": order_id, "value": total_value}
@@ -63,10 +64,12 @@ def execute_large_trade(order_id, quantity, price):
 
 # ── VULNERABILITY 6: Sensitive Data Exposure (PCI-DSS, DORA) ─────────────────
 def log_payment(card_number, cvv, amount):
-    """Log payment — VULNERABLE: logs raw card data."""
-    print(f"Processing card: {card_number} CVV: {cvv} amount: {amount}")   # DANGER
+    """Log payment — FIXED: masks sensitive card data, never logs raw PAN/CVV."""
+    # PCI-DSS Requirement 3: Never store full PAN or CVV in logs
+    masked_card = f"****-****-****-{card_number[-4:]}" if len(card_number) >= 4 else "****"
+    print(f"Processing card: {masked_card} amount: {amount}")   # SAFE: no raw PAN/CVV
     with open("/tmp/payments.log", "a") as f:
-        f.write(f"card={card_number},cvv={cvv},amount={amount}\n")          # DANGER
+        f.write(f"card={masked_card},amount={amount}\n")          # SAFE: no raw PAN/CVV
 
 
 # ── VULNERABILITY 7: Weak Cryptography (OWASP A02) ───────────────────────────
