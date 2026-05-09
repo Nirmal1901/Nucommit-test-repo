@@ -14,10 +14,10 @@ import requests
 
 # ── VULNERABILITY 1: SQL Injection (OWASP A03, MiFID II) ──────────────────────
 def get_trade_by_id(trade_id):
-    """Fetch trade record — VULNERABLE: raw string interpolation → SQL injection."""
+    """Fetch trade record — FIXED: parameterized query prevents SQL injection."""
     conn = sqlite3.connect("trades.db")
-    query = f"SELECT * FROM trades WHERE id = '{trade_id}'"   # DANGER
-    return conn.execute(query).fetchone()
+    query = "SELECT * FROM trades WHERE id = ?"
+    return conn.execute(query, (trade_id,)).fetchone()
 
 
 def search_orders(client_name, status):
@@ -50,12 +50,13 @@ def load_trade_config(config_bytes):
 
 # ── VULNERABILITY 5: No Auth / Missing Access Control (MiFID II, SEBI) ───────
 def execute_large_trade(order_id, quantity, price):
-    """Execute trade — VULNERABLE: no authentication, no authorisation check."""
+    """Execute trade — FIXED: parameterized query prevents SQL injection."""
     # Should verify: user role, trade limits, client mandate
     total_value = quantity * price
     conn = sqlite3.connect("trades.db")
     conn.execute(
-        f"INSERT INTO executions VALUES ('{order_id}', {quantity}, {price}, {total_value})"
+        "INSERT INTO executions VALUES (?, ?, ?, ?)",
+        (order_id, quantity, price, total_value)
     )
     conn.commit()
     return {"status": "executed", "order_id": order_id, "value": total_value}
